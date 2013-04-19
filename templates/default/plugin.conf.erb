@@ -7,7 +7,7 @@ LoadPlugin "<%= @name %>"
 <% if not @config.empty? %>
 <Plugin "<%= @name %>">
   <%= "<Carbon>" if @name == "write_graphite" %>
-  <% @config.each_pair do |key, value|
+  <% @config.sort.map do |key, value|
     if value.is_a? Array
       value.each do |subvalue| %>
   <%= key %> <%= collectd_option(subvalue) %>
