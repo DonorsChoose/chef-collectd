@@ -9,6 +9,7 @@ end
 if node["collectd"]["plugins"]
   plugins = node["collectd"]["plugins"]
   plugin_support_packages = []
+  plugin_enable_features = []
 
   case node["platform_family"]
   when "rhel"
@@ -30,8 +31,10 @@ if node["collectd"]["plugins"]
       plugins.include?("virt")
     plugin_support_packages << "mysql-devel" if plugins.include?("mysql")
     plugin_support_packages << "perl-devel" if plugins.include?("perl")
-    plugin_support_packages << "postgresql-devel" if plugins.include?("postgresql")
+    #plugin_support_packages << "postgresql-devel" if plugins.include?("postgresql")
+    plugin_enable_features << "--enable-postgresql" if plugins.include?("postgresql")
     plugin_support_packages << "python-devel" if plugins.include?("python")
+    plugin_enable_features << "--enable-python" if plugins.include?("python")
     plugin_support_packages << "rrdtool-devel" if plugins.include?("rrdcached") ||
       plugins.include?("rrdtool")
     plugin_support_packages << "varnish-libs-devel" if plugins.include?("varnish")
@@ -64,15 +67,33 @@ if node["collectd"]["plugins"]
 end
 
 bash "install-collectd" do
-  cwd Chef::Config[:file_cache_path]
+  #cwd Chef::Config[:file_cache_path]
+  cwd "/usr/local/src"
+  # We must build in support for some plugins, determined above and stored in
+  # the plugin_enable_features array.
   code <<-EOH
-    tar -xzf collectd-#{node["collectd"]["version"]}.tar.gz
-    (cd collectd-#{node["collectd"]["version"]} && ./configure --prefix=#{node["collectd"]["dir"]} && make && make install)
+    # See the remote_file resource below for collectd-*.tar.gz and
+    # a comment about how to pre-download and data_bags/collectd.install.json
+    #tar -xzf collectd-#{node["collectd"]["version"]}.tar.gz
+    tar -zxf #{Chef::Config[:file_cache_path]}/collectd-#{node["collectd"]["version"]}.tar.gz
+    # Note the CPPFLAGS and LDFLAGS are needed to --enable-postgresql in the build.
+    (cd collectd-#{node["collectd"]["version"]} && CPPFLAGS=-I/usr/pgsql-9.2/include LDFLAGS=-L/usr/pgsql-9.2/lib ./configure --prefix=#{node["collectd"]["dir"]} #{plugin_enable_features.join(' ')} && make && make install)
   EOH
-  action :nothing
+  #action :nothing
+  notifies :restart, "service[collectd]"
+  action :run
+  # This will build a new version, or you can force a rebuild by removing
+  # the /opt/collectd/sbin/collectd executable.
   not_if "#{node["collectd"]["dir"]}/sbin/collectd -h 2>&1 | grep #{node["collectd"]["version"]}"
 end
 
+# Note this compares the checksum of the /var/chef-solo/collectd-*.tar.gz
+# with the data_bags/collectd.json attribute, and will only attempt a
+# download if the checksum is incorrect. Since www.collectd.org is
+# refusing chef downloads because it was being overloaded, we must
+# pre-download the tarball. For example,
+#   curl --url http://www.collectd.org/files/collectd-5.3.0.tar.gz \
+#        --output /var/chef-solo/collectd-5.3.0.tar.gz
 remote_file "#{Chef::Config[:file_cache_path]}/collectd-#{node["collectd"]["version"]}.tar.gz" do
   source node["collectd"]["url"]
   checksum node["collectd"]["checksum"]
