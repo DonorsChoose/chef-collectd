@@ -191,3 +191,65 @@ a specific set of schemas in the cluster:
         }
       }
     }
+
+### Python Plugin
+
+DonorsChoose.org has added a number of customized python modules to collect
+metrics about the health and performance of the RAID storage. Since these
+are in exactly the same place on each database server node, this should be
+done in the `/var/chef-solo/roles/PGSQL.rb` file:
+
+    default_attributes({
+      "collectd" => {
+        "plugins" => {
+          "python" => {
+            "template" => "python.conf.erb",
+            "config" => {
+
+            # Home-grown cookbooks/collectd/files/default/*.py scripts:
+
+              # RAID health metrics
+              # The raid-controller.* describes the Adaptec RAID controller:
+              #   gauge-* for non_optimal_status, card_overheating, defunct_drives and battery_problems,
+              #   temperature-centigrade,
+              #   charge-* for battery_percent and battery_minutes.
+              # The raid-arrays.* describes the logical RAID groups:
+              #   current-num_logical_groups,
+              #   gauge-* for in_degraded_state, in_failed_state, in_write_through_mode and containing_bad_stripes.
+              # The raid-drives.* describes the physical drives in the RAID groups:
+              #   current-num_physical_drives,
+              #   gauge-* for in_abnormal_state and in_write_back_mode.
+              # The raid-hd[0-5].* describes the errors recorded for each physical drive:
+              #   current-* for hardware_errors, medium_errors and smart_warnings.
+              "raid" => {
+                "ArcconfCmd" => "/usr/StorMan/arcconf"
+              },
+
+              # The /proc/diskstats kernel statistics in a form easy for computing
+              # storage performance metrics:
+              #   disk_ops.* for read and write
+              #     (directly give Read & Write Ops/second)
+              #   disk_merged.* for read and write
+              #     (directly give Ops/second merged by kernel's queue scheduler into disk_ops.*)
+              #   disk_octets.* for read and write
+              #     (directly give Read MB/second throughput)
+              #     (divide by disk_ops.* to give Avg Read & Write Size in MB)
+              #   disk_time.* for read and write
+              #     (divide by 1000 to give Read & Write operation concurrency at the block device scheduler)
+              #     (divide by disk_ops.* to give Read & Write Response Time in ms at the block device scheduler)
+              #     (divide by [disk_ops.* + disk_merged.] to give Read & Write Response Time seen by the application making I/O requests)
+              #   disk_ops_complex-in_progress
+              #     (directly give number of IOP in progress instantaneously)
+              #   total_time_in_ms-serving_io
+              #     (divide serving_io by 10 to give %age busy for RAID controller, but concurrency is more meaningful)
+              #     (divide serving_io by [disk_ops.read + disk_ops.write] to give avg service time at the disk)
+              #   total_time_in_ms-weighted_io
+              #     (divide weighted_id by [both disk_ops.* + disk_merged.* + disk_ops_complex-in_progress] to give average response time from the beginning to the end of a request to the block device)
+              "diskstats" => {
+                "BlockDevice" => "sda"
+              }
+            }
+          }
+        }
+      }
+    }

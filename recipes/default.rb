@@ -132,6 +132,26 @@ directory "#{node["collectd"]["dir"]}/etc/conf.d" do
   action :create
 end
 
+directory "#{node["collectd"]["dir"]}/lib/collectd/python" do
+  action :create
+end
+
+cookbook_file "#{node["collectd"]["dir"]}/lib/collectd/python/raid.py" do
+  source "raid.py"
+  mode "0644"
+  owner "root"
+  group "root"
+  notifies :restart, "service[collectd]"
+end
+
+cookbook_file "#{node["collectd"]["dir"]}/lib/collectd/python/diskstats.py" do
+  source "diskstats.py"
+  mode "0644"
+  owner "root"
+  group "root"
+  notifies :restart, "service[collectd]"
+end
+
 service "collectd" do
   supports :status => true, :restart => true
   action [ :enable, :start ]
