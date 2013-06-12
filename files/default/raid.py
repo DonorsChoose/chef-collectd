@@ -226,7 +226,9 @@ def read_callback():
             continue
         bstatus = b_status_re.match(line)
         if bstatus:
-            if (bstatus.group(1) != "Optimal" and bstatus.group(1) != "ZMM Optimal"):
+            if (bstatus.group(1) != "Optimal"
+            and bstatus.group(1) != "Charging"
+            and bstatus.group(1) != "ZMM Optimal"):
                 battery_problems = 1
             continue
         btemp = b_temp_re.match(line)
