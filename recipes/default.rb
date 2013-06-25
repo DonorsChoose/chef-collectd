@@ -144,6 +144,14 @@ cookbook_file "#{node["collectd"]["dir"]}/lib/collectd/python/raid.py" do
   notifies :restart, "service[collectd]"
 end
 
+cookbook_file "#{node["collectd"]["dir"]}/lib/collectd/python/smartctl.py" do
+  source "smartctl.py"
+  mode "0644"
+  owner "root"
+  group "root"
+  notifies :restart, "service[collectd]"
+end
+
 cookbook_file "#{node["collectd"]["dir"]}/lib/collectd/python/diskstats.py" do
   source "diskstats.py"
   mode "0644"
