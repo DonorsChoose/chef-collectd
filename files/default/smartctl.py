@@ -215,7 +215,7 @@ def read_callback():
         # which are normally large.  Description from Seagate's SCSI manuals:
         #    Errors corrected without substantial delay. An error
         #    correction was applied to get perfect data (a.k.a., ECC
-        #    on-the-fly). “Without Substantial Delay” means the
+        #    on-the-fly). "Without Substantial Delay" means the
         #    correction did not postpone read- ing of later sectors
         #    (e.g., a revolution was not lost).
 
