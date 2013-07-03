@@ -411,6 +411,109 @@ LoadPlugin "<%= @name %>"
     </Result>
   </Query>
 
+  <Query streaming_replication_uptime>
+       # PostgreSQL pg_stat_replication
+       Statement "SELECT EXTRACT(EPOCH FROM age(now(),
+                      oldest_live_streaming.backend_start
+                    ))/(24*60*60) AS days_with_standby,
+                 CASE WHEN oldest_live_streaming.backend_start IS NULL
+                      THEN EXTRACT(EPOCH FROM age(now(),
+                             newest_repmgrd.last_monitor_time
+                           ))/(24*60*60) 
+                      ELSE NULL
+                      END AS days_without_standby
+          FROM
+            (SELECT max(last_monitor_time) AS last_monitor_time
+               FROM repmgr_data.repl_monitor
+            ) newest_repmgrd
+          LEFT JOIN
+            (SELECT min(backend_start) AS backend_start
+               FROM pg_stat_replication
+            ) oldest_live_streaming
+          ON 1=1
+          WHERE NOT pg_is_in_recovery();"
+
+       <Result>
+           Type "uptime"
+           InstancePrefix "days_with_standby"
+           ValuesFrom "days_with_standby"
+       </Result>
+       <Result>
+           Type "uptime"
+           InstancePrefix "days_without_standby"
+           ValuesFrom "days_without_standby"
+       </Result>
+  </Query>
+
+  <Query repmgrd_not_running>
+       # Complains (non-null) if backend_start more recent than last_monitor_time,
+       # which assumes repmgrd never exits while replication continues.
+       Statement "SELECT cluster || standby_node AS name,
+                 CASE WHEN backend_start > last_monitor_time
+                      THEN EXTRACT(EPOCH FROM age(now(), last_monitor_time))/(24*60*60)
+                      END AS value
+            FROM (SELECT repl_nodes.cluster,
+                         repl_status.standby_node,
+                         pg_stat_replication.backend_start,
+                         max(last_monitor_time) as last_monitor_time
+                    FROM pg_stat_replication -- Only shows rows on master
+                    JOIN repmgr_data.repl_nodes 
+                      ON repl_nodes.conninfo LIKE 'host=' || host(client_addr) || ' %'
+                    JOIN repmgr_data.repl_status 
+                      ON repl_status.standby_node = repl_nodes.id 
+                   GROUP BY backend_start, cluster, standby_node
+            ) live_streaming
+          ORDER BY standby_node;"
+
+        <Result> # repmgr.uptime-days_without_rempgrd-data*
+            Type "uptime"
+            InstancePrefix "days_without_rempgrd"
+            InstancesFrom "name"
+            ValuesFrom "value"
+        </Result>
+  </Query>
+
+  <Query streaming_replication_lags>
+       # PostgreSQL pg_stat_replication
+       Statement "SELECT CASE WHEN num = 1 THEN 'send_to_'
+                      WHEN num = 2 THEN 'recv_at_'
+                      WHEN num = 3 THEN 'flush_at_'
+                      WHEN num = 4 THEN 'replay_at_'
+                      ELSE null
+                      END || cluster || standby_node AS name,
+                 CASE WHEN num = 1 THEN sent_lag::integer
+                      WHEN num = 2 THEN received_lag::integer
+                      WHEN num = 3 THEN flush_lag::integer
+                      WHEN num = 4 THEN replay_lag::integer
+                      ELSE null
+                      END AS value
+            FROM (SELECT * from generate_series(1, 4) AS num) AS step
+            JOIN (SELECT repl_nodes.cluster,
+                         repl_status.standby_node,
+                         pg_xlog_location_diff(pg_current_xlog_location(), sent_location)
+                           AS sent_lag,
+                         pg_xlog_location_diff(sent_location, write_location)
+                           AS received_lag,
+                         pg_xlog_location_diff(write_location, flush_location)
+                           AS flush_lag,
+                         pg_xlog_location_diff(flush_location, replay_location)
+                           AS replay_lag
+                    FROM pg_stat_replication -- Only shows rows on master
+                    JOIN repmgr_data.repl_nodes 
+                      ON repl_nodes.conninfo LIKE 'host=' || host(client_addr) || ' %'
+                    JOIN repmgr_data.repl_status 
+                      ON repl_status.standby_node = repl_nodes.id 
+            ) live_streaming on 1=1
+          ORDER BY standby_node, step.num;"
+
+        <Result> # repmgr.bytes-replication_lag-send_to_data*
+            Type "bytes"
+            InstancePrefix "replication_lag"
+            InstancesFrom "name"
+            ValuesFrom "value"
+        </Result>
+  </Query>
+
   ########################################################################
   # Configuration of database connections and queries to be executed.
   ########################################################################
@@ -445,7 +548,31 @@ LoadPlugin "<%= @name %>"
   <% end end %>
 
   <% @config.sort.map do |dbname, params|
-       if dbname != "postgres" %>
+       if dbname == "repmgr" %>
+  # Replication monitoring
+  <Database "<%= dbname %>">
+    <% params.sort.map do |key, value|
+       if key != "Query"
+         if value.is_a? Array
+           value.each do |subvalue| %>
+    <%= key %> <%= collectd_option(subvalue) %>
+    <%   end else %>
+    <%= key %> <%= collectd_option(value) %>
+    <%   end end end %>
+
+    <% params.sort.map do |key, value|
+       if key == "Query"
+         if value.is_a? Array
+           value.each do |subvalue| %>
+    <%= key %> <%= collectd_option(subvalue) %>
+    <%   end else %>
+    <%= key %> <%= collectd_option(value) %>
+    <%   end end end %>
+  </Database>
+  <% end end %>
+
+  <% @config.sort.map do |dbname, params|
+       if dbname != "postgres" and dbname != "repmgr" %>
   # Schema-specific monitoring for "<%= dbname %>"
   <Database "<%= dbname %>">
     <% params.sort.map do |key, value|
