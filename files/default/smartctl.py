@@ -81,6 +81,16 @@ def configure_callback(conf):
                              % node.key)
 
 ######################################################################
+  # See /opt/collectd/share/collectd/types.db for all pre-defined Type
+  # names. Use a GAUGE Type to report a number as is.
+  # 
+  # Use a COUNTER or DERIVE Type if the number should be stored in graphite
+  # as a per-second rate. A COUNTER is a continuously incrementing counter
+  # with legitimate overflow wrap detection at the 32bit or 64bit border.
+  # A counter reset (as opposed to overflow wrap) should be detected, too.
+  # A DERIVE with min=0 is similar, without the overflow check, and would
+  # be something that fluctuates like a queue length.
+
 def dispatch_value(value, plugin_instance, type, type_instance):
     """Dispatch a value to write_graphite"""
 
@@ -184,6 +194,9 @@ def read_callback():
                 delayed_ecc_corrected += int(errorlog.group(3))
                 retries_corrected += int(errorlog.group(4))
                 errors_uncorrected += int(errorlog.group(8))
+                if (errorlog.group(1) == "read"):
+                    total_errors_corrected = int(errorlog.group(5))
+                    gigabytes_processed = float(errorlog.group(7))
             nonmedium = c_nonmedium_re.match(line)
             if nonmedium:
                 non_medium_errors = int(nonmedium.group(1))
@@ -210,6 +223,13 @@ def read_callback():
         dispatch_value(delayed_ecc_corrected, drive, 'current', 'medium_errors-delayed')
         dispatch_value(retries_corrected, drive, 'current', 'medium_errors-retried')
         dispatch_value(errors_uncorrected, drive, 'current', 'medium_errors-uncorrected')
+
+        dispatch_value(total_errors_corrected, drive, 'current', 'lifetime-ecc_blocks_corrected')
+        dispatch_value(total_errors_corrected, drive, 'counter', 'per_second-ecc_corrections')
+
+        dispatch_value(gigabytes_processed, drive, 'current', 'lifetime-gigabytes_processed')
+        dispatch_value((1000000000.0/1048576.0)*gigabytes_processed,
+           drive, 'derive', 'per_second-megabytes_read')
 
         # I'm omitting one count of medium errors: the "fast ECC corrections,"
         # which are normally large.  Description from Seagate's SCSI manuals:
