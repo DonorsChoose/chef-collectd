@@ -62,15 +62,33 @@
 
 ######################################################################
 import collectd, os, re, array
+import subprocess, signal
 
 # Adaptec's arcconf executable. Override in config by specifying 'ArcconfCmd'.
 SMARTCTL_CMD = '/usr/sbin/smartctl'
 SCSI_DRIVES = []
+SMARTCTL_INTERVAL = 60
 
+###############################################################################
+# WARNING! Importing this script will break the exec plugin! #
+###############################################################################
+# Use this if you want to create new processes from your python scripts. #
+# Normally you will get a OSError exception when the new process terminates #
+# because collectd will ignore the SIGCHLD python is waiting for. #
+# This script will restore the default SIGCHLD behavior so python scripts can #
+# create new processes without errors. #
+###############################################################################
+# WARNING! Importing this script will break the exec plugin! #
+###############################################################################
+def init():
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+
+###############################################################################
 def configure_callback(conf):
     """Receive configuration block"""
     global SMARTCTL_CMD
     global SCSI_DRIVES
+    global SMARTCTL_INTERVAL
     for node in conf.children:
         if node.key == 'SmartctlCmd':
             SMARTCTL_CMD = node.values[0]
@@ -101,7 +119,7 @@ def dispatch_value(value, plugin_instance, type, type_instance):
     val.values = [value]
 
     # send high-level values as ...plugin-plugin_instance.type-type_instance
-    val.dispatch()
+    val.dispatch(interval = SMARTCTL_INTERVAL)
 
 ########################################################################
 # Regex for matching and parsing lines of smartctl output
@@ -147,99 +165,128 @@ c_nonmedium_re = re.compile('^Non-medium error count:\s*([0-9]+)$')
 ########################################################################
 def read_callback():
 
-    # Test each drive in turn
+    # Dictionary mapping drive name (e.g., 'sg1') to the subprocess,
+    parallel_procs = {}
+
+    # Launch the smartctl child process in parallel.
     for drive in SCSI_DRIVES:
-        # -H
-        # SMART Health Status: OK
-        non_optimal_status = 1   # Assume non-optimal until seen
+        parallel_procs[drive] = subprocess.Popen(
+            [SMARTCTL_CMD, '-H', '-l', 'error', '-d', 'scsi',
+             '/dev/%s' % (drive)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT
+        )
 
-        # -A
-        # Current Drive Temperature:     26 C
-        centigrade = 0
+    # Test each drive in turn
+    for drive in parallel_procs.keys():
+        proc = parallel_procs[drive]
+        stdout_value = proc.communicate()[0] # As a single string
+        retcode = proc.wait()
 
-        # -A
-        # Elements in grown defect list: 0
-        glist_elements = 0
+        if (retcode != 0):
+            dispatch_value(retcode, drive, 'gauge', 'non_optimal_status')
+            collectd.info('smartctl /dev/%s returned %i, stdout+stderr="%s"' %
+                          (drive, retcode, stdout_value))
+                    
+        else:
+            # -H
+            # SMART Health Status: OK
+            non_optimal_status = 1   # Assume non-optimal until seen
 
-        # -l error
-        #            Errors Corrected by           Total   Correction     Gigabytes    Total
-        #                ECC          rereads/    errors   algorithm      processed    uncorrected
-        #            fast | delayed   rewrites  corrected  invocations   [10^9 bytes]  errors
-        # read:   3449928079       15         0  3449928094   3449928094      43999.159           0
-        # write:         0        0         0         0          0      44725.281           0
-        # verify:       93        0         0        93         93          0.000           0
-        # Those will be added into some buckets:
-        delayed_ecc_corrected = 0
-        retries_corrected = 0
-        errors_uncorrected = 0
+            # -A
+            # Current Drive Temperature:     26 C
+            centigrade = 0
 
-        # -l error
-        # Non-medium error count:       23
-        non_medium_errors = 0
+            # -A
+            # Elements in grown defect list: 0
+            glist_elements = 0
 
-        for line in os.popen4('%s -H -A -l error -d scsi /dev/%s' %
-                (SMARTCTL_CMD, drive))[1].readlines():
-            # Match the regexs
-            cstatus = c_status_re.match(line)
-            if cstatus:
-                non_optimal_status = 1 if (cstatus.group(1) != "OK") else 0
-            ctemp = c_temp_re.match(line)
-            if ctemp:
-                centigrade = int(ctemp.group(1))
-            glist = c_glist_re.match(line)
-            if glist:
-                glist_elements = int(glist.group(1))
-            errorlog = c_errorlog_re.match(line)
-            if errorlog:
-                delayed_ecc_corrected += int(errorlog.group(3))
-                retries_corrected += int(errorlog.group(4))
-                errors_uncorrected += int(errorlog.group(8))
-                if (errorlog.group(1) == "read"):
-                    total_errors_corrected = int(errorlog.group(5))
-                    gigabytes_processed = float(errorlog.group(7))
-            nonmedium = c_nonmedium_re.match(line)
-            if nonmedium:
-                non_medium_errors = int(nonmedium.group(1))
+            # -l error
+            #            Errors Corrected by           Total   Correction     Gigabytes    Total
+            #                ECC          rereads/    errors   algorithm      processed    uncorrected
+            #            fast | delayed   rewrites  corrected  invocations   [10^9 bytes]  errors
+            # read:   3449928079       15         0  3449928094   3449928094      43999.159           0
+            # write:         0        0         0         0          0      44725.281           0
+            # verify:       93        0         0        93         93          0.000           0
+            # Those will be added into some buckets:
+            delayed_ecc_corrected = 0
+            retries_corrected = 0
+            errors_uncorrected = 0
 
-        # send high-level values as ...smartctl-sg1.gauge-non_optimal_status, etc
-        dispatch_value(non_optimal_status, drive, 'gauge', 'non_optimal_status')
-        dispatch_value(centigrade, drive, 'temperature', 'centigrade')
+            # These "read" values will be reported alone:
+            total_errors_corrected = 0
+            gigabytes_processed = 0
 
-        # "All defects sent by the application client to the device server."
-        # It's possible these correlate to smartctl 'medium_errors-uncorrected'
-        # and to the raid.py 'current-medium_errors' counters.
-        dispatch_value(glist_elements, drive, 'current', 'grown_defects')
+            # -l error
+            # Non-medium error count:       23
+            non_medium_errors = 0
 
-        # This was 210102 on data2 /dev/sg2 on 2013-06-23, before Softlayer replaced.
-        # There was nothing reported through the raid.py monitor, perhaps because
-        # these errors were older?
-        dispatch_value(non_medium_errors, drive, 'current', 'non_medium_errors')
+            for line in stdout_value.splitlines():
+                # Match the regexs
+                cstatus = c_status_re.match(line)
+                if cstatus:
+                    non_optimal_status = 1 if (cstatus.group(1) != "OK") else 0
+                    if (cstatus.group(1) != "OK"):
+                        collectd.info('smartctl /dev/%s says "SMART Health Status: %s" instead of OK. These are usually correlated with large-huge -3 orders of magnitude - jumps in derive-per_second-megabytes_read of +2000 to +2500Ki, and correlated temporary blips in current-non_medium_errors by -3 and counter-per_second-ecc_corrections by +60M. (See http://smartmontools.sourceforge.net/smartmontools_scsi.html#iereport)' %
+                            (drive, cstatus.group(1)))
+                ctemp = c_temp_re.match(line)
+                if ctemp:
+                    centigrade = int(ctemp.group(1))
+                glist = c_glist_re.match(line)
+                if glist:
+                    glist_elements = int(glist.group(1))
+                errorlog = c_errorlog_re.match(line)
+                if errorlog:
+                    delayed_ecc_corrected += int(errorlog.group(3))
+                    retries_corrected += int(errorlog.group(4))
+                    errors_uncorrected += int(errorlog.group(8))
+                    if (errorlog.group(1) == "read"):
+                        total_errors_corrected = int(errorlog.group(5))
+                        gigabytes_processed = float(errorlog.group(7))
+                nonmedium = c_nonmedium_re.match(line)
+                if nonmedium:
+                    non_medium_errors = int(nonmedium.group(1))
 
-        # The reported medium erros are "errors corrected with possible delays"
-        # and "errors that are corrected by applying retries" (both sound like
-        # near misses), plus "the total number of blocks for which an uncorrected
-        # data error has occurred" (presumably terminating the transfer and
-        # indicating to the OS that data is lost). These are normally small.
-        dispatch_value(delayed_ecc_corrected, drive, 'current', 'medium_errors-delayed')
-        dispatch_value(retries_corrected, drive, 'current', 'medium_errors-retried')
-        dispatch_value(errors_uncorrected, drive, 'current', 'medium_errors-uncorrected')
+            # send high-level values as ...smartctl-sg1.gauge-non_optimal_status, etc
+            dispatch_value(non_optimal_status, drive, 'gauge', 'non_optimal_status')
+            dispatch_value(centigrade, drive, 'temperature', 'centigrade')
 
-        dispatch_value(total_errors_corrected, drive, 'current', 'lifetime-ecc_blocks_corrected')
-        dispatch_value(total_errors_corrected, drive, 'counter', 'per_second-ecc_corrections')
+            # "All defects sent by the application client to the device server."
+            # It's possible these correlate to smartctl 'medium_errors-uncorrected'
+            # and to the raid.py 'current-medium_errors' counters.
+            dispatch_value(glist_elements, drive, 'current', 'grown_defects')
 
-        dispatch_value(gigabytes_processed, drive, 'current', 'lifetime-gigabytes_processed')
-        dispatch_value((1000000000.0/1048576.0)*gigabytes_processed,
-           drive, 'derive', 'per_second-megabytes_read')
+            # This was 210102 on data2 /dev/sg2 on 2013-06-23, before Softlayer replaced.
+            # There was nothing reported through the raid.py monitor, perhaps because
+            # these errors were older?
+            dispatch_value(non_medium_errors, drive, 'current', 'non_medium_errors')
 
-        # I'm omitting one count of medium errors: the "fast ECC corrections,"
-        # which are normally large.  Description from Seagate's SCSI manuals:
-        #    Errors corrected without substantial delay. An error
-        #    correction was applied to get perfect data (a.k.a., ECC
-        #    on-the-fly). "Without Substantial Delay" means the
-        #    correction did not postpone read- ing of later sectors
-        #    (e.g., a revolution was not lost).
+            # The reported medium erros are "errors corrected with possible delays"
+            # and "errors that are corrected by applying retries" (both sound like
+            # near misses), plus "the total number of blocks for which an uncorrected
+            # data error has occurred" (presumably terminating the transfer and
+            # indicating to the OS that data is lost). These are normally small.
+            dispatch_value(delayed_ecc_corrected, drive, 'current', 'medium_errors-delayed')
+            dispatch_value(retries_corrected, drive, 'current', 'medium_errors-retried')
+            dispatch_value(errors_uncorrected, drive, 'current', 'medium_errors-uncorrected')
+
+            dispatch_value(total_errors_corrected, drive, 'current', 'lifetime-ecc_blocks_corrected')
+            dispatch_value(total_errors_corrected, drive, 'counter', 'per_second-ecc_corrections')
+
+            dispatch_value(gigabytes_processed, drive, 'current', 'lifetime-gigabytes_processed')
+            dispatch_value((1000000000.0/1048576.0)*gigabytes_processed,
+               drive, 'derive', 'per_second-megabytes_read')
+
+            # I'm omitting one count of medium errors: the "fast ECC corrections,"
+            # which are normally large.  Description from Seagate's SCSI manuals:
+            #    Errors corrected without substantial delay. An error
+            #    correction was applied to get perfect data (a.k.a., ECC
+            #    on-the-fly). "Without Substantial Delay" means the
+            #    correction did not postpone read- ing of later sectors
+            #    (e.g., a revolution was not lost).
 
 ########################################################################
 # register callbacks
+collectd.register_init(init)
 collectd.register_config(configure_callback)
-collectd.register_read(read_callback)
+collectd.register_read(read_callback, SMARTCTL_INTERVAL)
