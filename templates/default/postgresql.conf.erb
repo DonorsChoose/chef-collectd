@@ -413,44 +413,55 @@ LoadPlugin "<%= @name %>"
 
   <Query streaming_replication_uptime>
        # PostgreSQL pg_stat_replication
-       Statement "SELECT EXTRACT(EPOCH FROM age(now(),
-                      oldest_live_streaming.backend_start
-                    ))/(24*60*60) AS days_with_standby,
-                 CASE WHEN oldest_live_streaming.backend_start IS NULL
+       Statement "SELECT name, value
+        FROM (
+          SELECT CASE WHEN num = 1 THEN 'hot_standby'
+                      WHEN num = 2 THEN 'no_standby'
+                      ELSE null
+                      END AS name,
+                 CASE WHEN num = 1
                       THEN EXTRACT(EPOCH FROM age(now(),
-                             newest_repmgrd.last_monitor_time
-                           ))/(24*60*60) 
-                      ELSE NULL
-                      END AS days_without_standby
-          FROM
+                             oldest_live_streaming.backend_start
+                           ))/(24*60*60)
+                      WHEN num = 2 
+                      THEN CASE WHEN oldest_live_streaming.backend_start IS NULL
+                                THEN EXTRACT(EPOCH FROM age(now(),
+                                       newest_repmgrd.last_monitor_time
+                                     ))/(24*60*60)
+                                ELSE NULL
+                                END
+                      ELSE null
+                      END AS value
+          FROM (SELECT * from generate_series(1, 2) AS num) AS field
+          JOIN
             (SELECT max(last_monitor_time) AS last_monitor_time
                FROM repmgr_data.repl_monitor
-            ) newest_repmgrd
+            ) newest_repmgrd ON 1=1
           LEFT JOIN
             (SELECT min(backend_start) AS backend_start
                FROM pg_stat_replication
             ) oldest_live_streaming
           ON 1=1
-          WHERE NOT pg_is_in_recovery();"
+          WHERE NOT pg_is_in_recovery()    
+        ) stats
+        WHERE value IS NOT NULL;"
 
-       <Result>
+       <Result> # repmgr.uptime-streaming-hot_standby
+                # repmgr.uptime-streaming-no_standby
            Type "uptime"
-           InstancePrefix "days_with_standby"
-           ValuesFrom "days_with_standby"
-       </Result>
-       <Result>
-           Type "uptime"
-           InstancePrefix "days_without_standby"
-           ValuesFrom "days_without_standby"
+           InstancePrefix "streaming"
+           InstancesFrom "name"
+           ValuesFrom "value"
        </Result>
   </Query>
 
   <Query repmgrd_not_running>
        # Complains (non-null) if backend_start more recent than last_monitor_time,
        # which assumes repmgrd never exits while replication continues.
-       Statement "SELECT cluster || standby_node AS name,
+       Statement "SELECT 'down_on_' || cluster || standby_node AS name,
                  CASE WHEN backend_start > last_monitor_time
                       THEN EXTRACT(EPOCH FROM age(now(), last_monitor_time))/(24*60*60)
+                      ELSE NULL
                       END AS value
             FROM (SELECT repl_nodes.cluster,
                          repl_status.standby_node,
@@ -463,11 +474,12 @@ LoadPlugin "<%= @name %>"
                       ON repl_status.standby_node = repl_nodes.id 
                    GROUP BY backend_start, cluster, standby_node
             ) live_streaming
+          WHERE backend_start > last_monitor_time
           ORDER BY standby_node;"
 
-        <Result> # repmgr.uptime-days_without_rempgrd-data*
+        <Result> # repmgr.uptime-repmgrd-down_on_data*
             Type "uptime"
-            InstancePrefix "days_without_rempgrd"
+            InstancePrefix "repmgrd"
             InstancesFrom "name"
             ValuesFrom "value"
         </Result>
@@ -481,10 +493,10 @@ LoadPlugin "<%= @name %>"
                       WHEN num = 4 THEN 'replay_at_'
                       ELSE null
                       END || cluster || standby_node AS name,
-                 CASE WHEN num = 1 THEN sent_lag::integer
-                      WHEN num = 2 THEN received_lag::integer
-                      WHEN num = 3 THEN flush_lag::integer
-                      WHEN num = 4 THEN replay_lag::integer
+                 CASE WHEN num = 1 THEN sent_lag::bigint
+                      WHEN num = 2 THEN received_lag::bigint
+                      WHEN num = 3 THEN flush_lag::bigint
+                      WHEN num = 4 THEN replay_lag::bigint
                       ELSE null
                       END AS value
             FROM (SELECT * from generate_series(1, 4) AS num) AS step
